@@ -1,0 +1,88 @@
+{
+  "title": "Apollo.io Scraper - Enhanced Anti-Detection",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "apolloCookies": {
+      "title": "Apollo.io Cookies (JSON)",
+      "type": "string",
+      "description": "JSON array of cookies exported from your browser (e.g. via EditThisCookie or DevTools). This is the RECOMMENDED auth method — paste the full JSON array here. If provided, email/password are not needed.",
+      "editor": "textarea",
+      "example": "[{\"domain\":\".apollo.io\",\"name\":\"remember_token_leadgenie_v2\",\"value\":\"...\",\"path\":\"/\"}]"
+    },
+    "apolloEmail": {
+      "title": "Apollo.io Email (Optional if cookies provided)",
+      "type": "string",
+      "description": "Your Apollo.io account email. Not needed if you provide cookies above.",
+      "editor": "textfield",
+      "example": "your@email.com"
+    },
+    "apolloPassword": {
+      "title": "Apollo.io Password (Optional if cookies provided)",
+      "type": "string",
+      "description": "Your Apollo.io account password. Not needed if you provide cookies above.",
+      "editor": "textfield",
+      "isSecret": true
+    },
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "description": "Apollo.io URLs to scrape (search results, company profiles, contact pages)",
+      "editor": "requestListSources",
+      "prefill": [
+        {
+          "url": "https://app.apollo.io/#/search?query=..."
+        }
+      ]
+    },
+    "maxPages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Maximum number of pages to scrape per URL (default: 10)",
+      "editor": "number",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "enrichProfiles": {
+      "title": "Enrich Profiles",
+      "type": "boolean",
+      "description": "Visit each contact's detail page for complete data (slower but more data)",
+      "editor": "checkbox",
+      "default": true
+    },
+    "minDelay": {
+      "title": "Minimum Delay (seconds)",
+      "type": "integer",
+      "description": "Minimum delay between actions to avoid detection",
+      "editor": "number",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 10
+    },
+    "maxDelay": {
+      "title": "Maximum Delay (seconds)",
+      "type": "integer",
+      "description": "Maximum delay between actions",
+      "editor": "number",
+      "default": 7,
+      "minimum": 2,
+      "maximum": 20
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration (Optional)",
+      "type": "object",
+      "description": "⚠️ IMPORTANT: Use RESIDENTIAL proxies only! Apify datacenter proxies are blocked by Apollo. Recommended providers: BrightData, Oxylabs, or use your own residential proxy.",
+      "editor": "proxy",
+      "prefill": {
+        "useApifyProxy": false
+      }
+    }
+  },
+  "required": ["startUrls"]
+}
+
+
+
+
+

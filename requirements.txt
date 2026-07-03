@@ -1,0 +1,11 @@
+apify>=1.7.0
+# Anti-detection libraries - BEST for bypassing bot detection
+undetected-chromedriver>=3.5.4
+selenium>=4.15.2
+# Human-like behavior and fake data generation
+faker>=20.0.0
+# Parsing libraries
+beautifulsoup4==4.12.2
+lxml==4.9.3
+# Additional utilities
+python-dateutil>=2.8.2

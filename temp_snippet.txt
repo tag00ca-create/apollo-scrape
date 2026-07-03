@@ -1,0 +1,7 @@
+        log_message("Scraping search results...", 'INFO')
+        
+        while page_num <= max_pages:
+            log_message(f"Scraping page {{page_num}}...", 'INFO')
+            
+            # Wait for results to load
+            random_delay(min_delay, max_delay)
