@@ -150,6 +150,14 @@ async def main():
                 except Exception as e:
                     log_message(f"⚠️  Could not save cookies: {e}", 'WARNING')
             
+            from src.segmenter import SearchSegmenter
+            from src.parser import parse_apollo_search_url
+
+            # Load state for Mega Job
+            kvs = await Actor.open_key_value_store()
+            state = await kvs.get_value('mega_job_state') or {'completed_segments': []}
+            completed_segments = set(state.get('completed_segments', []))
+            
             # Process each URL
             for idx, url_obj in enumerate(start_urls):
                 url = url_obj.get('url') if isinstance(url_obj, dict) else url_obj
@@ -160,31 +168,67 @@ async def main():
                 
                 log_message(f"Processing URL {idx + 1}/{len(start_urls)}: {url}")
                 
-                try:
-                    # Scrape the URL — API-based for search pages, HTML for profiles
-                    results = scraper.scrape_url(
-                        url=url,
-                        follow_links=enrich_profiles,
-                        max_pages=max_pages,
-                        min_delay=min_delay,
-                        max_delay=max_delay
-                    )
+                # Check if it's a search URL (Mega Job capable)
+                if '#/people' in url or '#/companies' in url:
+                    parsed = parse_apollo_search_url(url)
+                    segmenter = SearchSegmenter()
+                    # Using deep level for millions of rows
+                    segments = segmenter.generate_segments(level='deep', filters=parsed['filters'])
                     
-                    log_message(f"Scraped {len(results)} results from URL", 'SUCCESS')
+                    log_message(f"🚀 MEGA JOB: Generated {len(segments)} segments for search.", 'INFO')
+                    log_message(f"Resume state: {len(completed_segments)} segments already completed.", 'INFO')
                     
-                    # Log output columns from first result for verification
-                    if results and total_results == 0:
-                        columns = list(results[0].keys())
-                        log_message(f"📊 Output columns ({len(columns)}): {', '.join(columns)}", 'INFO')
-                    
-                    # Push results to Apify dataset
-                    if results:
-                        await Actor.push_data(results)
-                        total_results += len(results)
-                    
-                except Exception as e:
-                    log_message(f"Error scraping {url}: {str(e)}", 'ERROR')
-                    continue
+                    for seg_idx, segment in enumerate(segments):
+                        seg_id = f"{url}_{segment['id']}"
+                        if seg_id in completed_segments:
+                            continue
+                            
+                        log_message(f"📍 Segment {seg_idx+1}/{len(segments)}: {segment['label']}", 'INFO')
+                        
+                        # Build segment URL (page 1)
+                        seg_url = scraper._build_search_url(segment['filters'], 1)
+                        
+                        try:
+                            # Scrape up to 100 pages (Apollo's hard limit per query)
+                            results = scraper.scrape_url(
+                                url=seg_url,
+                                follow_links=enrich_profiles,
+                                max_pages=100, 
+                                min_delay=min_delay,
+                                max_delay=max_delay
+                            )
+                            
+                            if results and total_results == 0:
+                                columns = list(results[0].keys())
+                                log_message(f"📊 Output columns ({len(columns)}): {', '.join(columns)}", 'INFO')
+                                
+                            if results:
+                                await Actor.push_data(results)
+                                total_results += len(results)
+                                
+                            # Save state after each segment
+                            completed_segments.add(seg_id)
+                            await kvs.set_value('mega_job_state', {'completed_segments': list(completed_segments)})
+                            
+                        except Exception as e:
+                            log_message(f"Error in segment {segment['label']}: {str(e)}", 'ERROR')
+                            
+                else:
+                    # Regular profile URL (HTML fallback)
+                    try:
+                        results = scraper.scrape_url(
+                            url=url,
+                            follow_links=enrich_profiles,
+                            max_pages=max_pages,
+                            min_delay=min_delay,
+                            max_delay=max_delay
+                        )
+                        
+                        if results:
+                            await Actor.push_data(results)
+                            total_results += len(results)
+                    except Exception as e:
+                        log_message(f"Error scraping {url}: {str(e)}", 'ERROR')
             
             log_message(f"🎉 Scraping complete! Total results: {total_results}", 'SUCCESS')
             

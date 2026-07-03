@@ -232,6 +232,23 @@ class ApolloScraper:
             });
         } catch(e) {}
         
+        // 9. API Interception for Stealth Bypass
+        window.__interceptedData = window.__interceptedData || [];
+        const originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+            const response = await originalFetch.apply(this, args);
+            const url = args[0];
+            if (typeof url === 'string' && (url.includes('/api/v1/mixed_people/search') || url.includes('/api/v1/mixed_companies/search'))) {
+                try {
+                    const clone = response.clone();
+                    clone.json().then(data => {
+                        window.__interceptedData.push({ url, data });
+                    }).catch(e => console.error(e));
+                } catch(e) {}
+            }
+            return response;
+        };
+        
         console.log('🔒 Advanced stealth mode activated');
         """
         
@@ -610,93 +627,6 @@ class ApolloScraper:
     # API-BASED SEARCH (PRIMARY) — Uses Apollo's internal API
     # ═══════════════════════════════════════════════════════════════
     
-    def search_people_via_api(self, filters: Dict, page: int = 1, per_page: int = 25) -> Optional[Dict]:
-        """
-        Call Apollo's internal search API from within the browser.
-        
-        Executes fetch() inside the page context — uses the browser's real
-        cookies, CSRF token, and TLS fingerprint. Completely undetectable.
-        
-        Args:
-            filters: API filter parameters (person_locations, person_titles, etc.)
-            page: Page number
-            per_page: Results per page (max 100)
-        
-        Returns:
-            Raw API response dict, or None on failure
-        """
-        # Build the request body
-        body = {
-            'page': page,
-            'per_page': per_page,
-            'prospected_by_current_team': ['no'],
-            'display_mode': 'explorer',
-            'show_app_filters': True,
-            'finder_table_layout_id': 'default',
-        }
-        
-        # Merge filters
-        for key, value in filters.items():
-            if value is not None:
-                body[key] = value
-        
-        log_message(f"🔍 API search: page={page}, per_page={per_page}, filters={list(filters.keys())}", 'DEBUG')
-        
-        try:
-            # Execute fetch() inside the browser page — this uses the browser's
-            # real cookies and TLS fingerprint, making it undetectable
-            result = self.driver.execute_async_script("""
-                const requestBody = arguments[0];
-                const callback = arguments[arguments.length - 1];
-                
-                // Get CSRF token from cookie
-                const csrfCookie = document.cookie.split(';')
-                    .map(c => c.trim())
-                    .find(c => c.startsWith('X-CSRF-TOKEN='));
-                const csrfToken = csrfCookie ? csrfCookie.split('=').slice(1).join('=') : '';
-                
-                fetch('/api/v1/mixed_people/search', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRF-TOKEN': csrfToken,
-                    },
-                    body: JSON.stringify(requestBody),
-                    credentials: 'same-origin',
-                })
-                .then(response => {
-                    if (!response.ok) {
-                        return response.text().then(text => {
-                            callback({ _error: true, _status: response.status, _message: text.substring(0, 500) });
-                        });
-                    }
-                    return response.json().then(data => callback(data));
-                })
-                .catch(err => {
-                    callback({ _error: true, _status: 0, _message: err.message });
-                });
-            """, body)
-            
-            # Check for errors
-            if result and result.get('_error'):
-                status = result.get('_status', 0)
-                message = result.get('_message', 'Unknown error')
-                log_message(f"❌ API error {status}: {message[:200]}", 'ERROR')
-                
-                if status == 401 or status == 403:
-                    log_message("🔑 Session expired — cookies may need refresh", 'ERROR')
-                elif status == 429:
-                    log_message("⏳ Rate limited — waiting before retry...", 'WARNING')
-                    random_delay(10, 20)
-                
-                return None
-            
-            return result
-            
-        except Exception as e:
-            log_message(f"❌ API call failed: {str(e)}", 'ERROR')
-            return None
-    
     def scrape_url(self, url: str, follow_links: bool = True, max_pages: int = None, min_delay: int = 3, max_delay: int = 7) -> List[Dict[str, Any]]:
         """
         Scrape data from a given Apollo.io URL.
@@ -749,23 +679,46 @@ class ApolloScraper:
             log_message("⚠️  Unknown page type, attempting generic extraction...", 'WARNING')
             return [self._scrape_generic_page()]
     
+    def _build_search_url(self, filters: Dict, page: int = 1) -> str:
+        """Build Apollo URL from filter parameters to trigger the API request."""
+        import urllib.parse
+        
+        base_url = "https://app.apollo.io/#/people?"
+        params = []
+        
+        if 'person_locations' in filters:
+            for loc in filters['person_locations']:
+                params.append(f"personLocations[]={urllib.parse.quote(loc)}")
+                
+        if 'person_titles' in filters:
+            for t in filters['person_titles']:
+                params.append(f"personTitles[]={urllib.parse.quote(t)}")
+                
+        if 'person_seniorities' in filters:
+            for s in filters['person_seniorities']:
+                params.append(f"personSeniorities[]={urllib.parse.quote(s)}")
+                
+        if 'organization_industries' in filters:
+            for ind in filters['organization_industries']:
+                params.append(f"organizationIndustries[]={urllib.parse.quote(ind)}")
+                
+        if 'organization_num_employees_ranges' in filters:
+            for r in filters['organization_num_employees_ranges']:
+                params.append(f"organizationNumEmployeesRanges[]={urllib.parse.quote(r)}")
+        
+        params.append(f"page={page}")
+        params.append("sortByField=[none]")
+        params.append("sortAscending=false")
+        
+        return base_url + "&".join(params)
+
     def _scrape_search_via_api(self, url: str, search_type: str = 'people', max_pages: int = 10, min_delay: int = 3, max_delay: int = 7) -> List[Dict[str, Any]]:
         """
-        Scrape search results using Apollo's internal API with pagination.
+        Scrape search results using network interception (Stealth Bypass).
         
-        This is the PRIMARY extraction method. It calls /api/v1/mixed_people/search
-        from within the browser, getting clean structured JSON with all fields
-        (email, phone, company, etc.) — no HTML parsing needed.
-        
-        Args:
-            url: Original Apollo search URL (parsed for filters)
-            search_type: 'people' or 'organizations'
-            max_pages: Maximum pages to scrape
-            min_delay: Minimum delay between API calls
-            max_delay: Maximum delay between API calls
-        
-        Returns:
-            List of flat record dicts ready for Apify dataset
+        Instead of calling the API ourselves (which gets 422 Bot Detected),
+        we navigate to the URL and let Apollo's frontend make the request.
+        Our injected JS intercepts the response flawlessly.
         """
         all_results = []
         
@@ -774,25 +727,37 @@ class ApolloScraper:
         filters = parsed['filters']
         start_page = parsed.get('page', 1)
         
-        # First, navigate to Apollo so we're on the right domain for fetch()
-        log_message(f"🌐 Navigating to Apollo for API access...", 'INFO')
-        self.driver.get("https://app.apollo.io/#/people")
-        random_delay(3, 5)
-        
-        # Scrape pages
         for page_offset in range(max_pages):
             current_page = start_page + page_offset
-            log_message(f"📄 Fetching page {current_page} via API...", 'INFO')
+            log_message(f"📄 Scraping page {current_page} via API Interception...", 'INFO')
             
-            # Call the API
-            api_response = self.search_people_via_api(
-                filters=filters,
-                page=current_page,
-                per_page=25
-            )
+            search_url = self._build_search_url(filters, current_page)
             
+            # Clear previous intercepted data
+            self.driver.execute_script("window.__interceptedData = [];")
+            
+            # Navigate to trigger the React app to fetch data
+            log_message(f"🌐 Navigating to trigger API request...", 'DEBUG')
+            self.driver.get(search_url)
+            
+            # Wait for data to be intercepted
+            api_response = None
+            for _ in range(15):  # Wait up to 15 seconds
+                random_delay(1, 1)
+                
+                # Check for intercepted data
+                intercepted = self.driver.execute_script("return window.__interceptedData;")
+                if intercepted and len(intercepted) > 0:
+                    api_response = intercepted[-1].get('data')
+                    break
+                    
             if not api_response:
-                log_message(f"⚠️  No API response for page {current_page}, stopping.", 'WARNING')
+                log_message(f"⚠️  No API response intercepted for page {current_page}, stopping.", 'WARNING')
+                break
+                
+            # Check for API errors in the response body
+            if api_response.get('error'):
+                log_message(f"❌ Apollo API returned error: {api_response['error']}", 'ERROR')
                 break
             
             # Get pagination info
@@ -802,7 +767,6 @@ class ApolloScraper:
             
             if page_offset == 0:
                 log_message(f"📊 Total results available: {total} across {total_pages} pages", 'INFO')
-                # Cap max_pages to actual available pages
                 max_pages = min(max_pages, total_pages)
             
             # Flatten the results into structured records
@@ -812,11 +776,6 @@ class ApolloScraper:
                 log_message(f"⚠️  No records on page {current_page}, stopping.", 'WARNING')
                 break
             
-            # Log sample data for verification
-            if records and page_offset == 0:
-                sample = records[0]
-                log_message(f"📋 Sample record: {sample.get('name', '?')} | {sample.get('title', '?')} | {sample.get('email', '?')} | {sample.get('company_name', '?')}", 'INFO')
-            
             all_results.extend(records)
             log_message(f"✅ Page {current_page}: {len(records)} records (total so far: {len(all_results)})", 'SUCCESS')
             
@@ -825,10 +784,8 @@ class ApolloScraper:
                 log_message(f"📄 Reached last page ({total_pages})", 'INFO')
                 break
             
-            # Human-like delay between API calls
+            # Human-like delay and scroll
             random_delay(min_delay, max_delay)
-            
-            # Random scroll to simulate human behavior
             try:
                 self.driver.execute_script(f"window.scrollTo(0, {random.randint(200, 600)});")
             except:
