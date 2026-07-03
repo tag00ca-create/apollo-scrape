@@ -161,7 +161,7 @@ async def main():
                 log_message(f"Processing URL {idx + 1}/{len(start_urls)}: {url}")
                 
                 try:
-                    # Scrape the URL
+                    # Scrape the URL — API-based for search pages, HTML for profiles
                     results = scraper.scrape_url(
                         url=url,
                         follow_links=enrich_profiles,
@@ -170,7 +170,12 @@ async def main():
                         max_delay=max_delay
                     )
                     
-                    log_message(f"Scraped {len(results)} results from {url}", 'SUCCESS')
+                    log_message(f"Scraped {len(results)} results from URL", 'SUCCESS')
+                    
+                    # Log output columns from first result for verification
+                    if results and total_results == 0:
+                        columns = list(results[0].keys())
+                        log_message(f"📊 Output columns ({len(columns)}): {', '.join(columns)}", 'INFO')
                     
                     # Push results to Apify dataset
                     if results:
@@ -181,7 +186,7 @@ async def main():
                     log_message(f"Error scraping {url}: {str(e)}", 'ERROR')
                     continue
             
-            log_message(f"Scraping complete! Total results: {total_results}", 'SUCCESS')
+            log_message(f"🎉 Scraping complete! Total results: {total_results}", 'SUCCESS')
             
         except Exception as e:
             log_message(f"Fatal error: {str(e)}", 'ERROR')

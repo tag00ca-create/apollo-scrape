@@ -20,7 +20,9 @@ from src.config import Config
 from src.utils import random_delay, retry_on_failure, log_message, is_valid_url
 from src.parser import (
     parse_search_results, parse_contact_profile,
-    parse_company_profile, detect_page_type
+    parse_company_profile, detect_page_type,
+    parse_apollo_search_url, flatten_api_response,
+    get_pagination_info
 )
 
 
@@ -604,16 +606,110 @@ class ApolloScraper:
         
         return detected
     
+    # ═══════════════════════════════════════════════════════════════
+    # API-BASED SEARCH (PRIMARY) — Uses Apollo's internal API
+    # ═══════════════════════════════════════════════════════════════
+    
+    def search_people_via_api(self, filters: Dict, page: int = 1, per_page: int = 25) -> Optional[Dict]:
+        """
+        Call Apollo's internal search API from within the browser.
+        
+        Executes fetch() inside the page context — uses the browser's real
+        cookies, CSRF token, and TLS fingerprint. Completely undetectable.
+        
+        Args:
+            filters: API filter parameters (person_locations, person_titles, etc.)
+            page: Page number
+            per_page: Results per page (max 100)
+        
+        Returns:
+            Raw API response dict, or None on failure
+        """
+        # Build the request body
+        body = {
+            'page': page,
+            'per_page': per_page,
+            'prospected_by_current_team': ['no'],
+            'display_mode': 'explorer',
+            'show_app_filters': True,
+            'finder_table_layout_id': 'default',
+        }
+        
+        # Merge filters
+        for key, value in filters.items():
+            if value is not None:
+                body[key] = value
+        
+        log_message(f"🔍 API search: page={page}, per_page={per_page}, filters={list(filters.keys())}", 'DEBUG')
+        
+        try:
+            # Execute fetch() inside the browser page — this uses the browser's
+            # real cookies and TLS fingerprint, making it undetectable
+            result = self.driver.execute_async_script("""
+                const requestBody = arguments[0];
+                const callback = arguments[arguments.length - 1];
+                
+                // Get CSRF token from cookie
+                const csrfCookie = document.cookie.split(';')
+                    .map(c => c.trim())
+                    .find(c => c.startsWith('X-CSRF-TOKEN='));
+                const csrfToken = csrfCookie ? csrfCookie.split('=').slice(1).join('=') : '';
+                
+                fetch('/api/v1/mixed_people/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': csrfToken,
+                    },
+                    body: JSON.stringify(requestBody),
+                    credentials: 'same-origin',
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.text().then(text => {
+                            callback({ _error: true, _status: response.status, _message: text.substring(0, 500) });
+                        });
+                    }
+                    return response.json().then(data => callback(data));
+                })
+                .catch(err => {
+                    callback({ _error: true, _status: 0, _message: err.message });
+                });
+            """, body)
+            
+            # Check for errors
+            if result and result.get('_error'):
+                status = result.get('_status', 0)
+                message = result.get('_message', 'Unknown error')
+                log_message(f"❌ API error {status}: {message[:200]}", 'ERROR')
+                
+                if status == 401 or status == 403:
+                    log_message("🔑 Session expired — cookies may need refresh", 'ERROR')
+                elif status == 429:
+                    log_message("⏳ Rate limited — waiting before retry...", 'WARNING')
+                    random_delay(10, 20)
+                
+                return None
+            
+            return result
+            
+        except Exception as e:
+            log_message(f"❌ API call failed: {str(e)}", 'ERROR')
+            return None
+    
     def scrape_url(self, url: str, follow_links: bool = True, max_pages: int = None, min_delay: int = 3, max_delay: int = 7) -> List[Dict[str, Any]]:
         """
         Scrape data from a given Apollo.io URL.
         
+        For search URLs (#/people, #/companies), uses Apollo's internal API
+        to get structured JSON data with all fields.
+        
         Args:
             url: Apollo.io URL to scrape
-            follow_links: Follow links to detail pages for enrichment
-            max_pages: Maximum number of pages to scrape (for search results)
-            min_delay: Minimum delay between requests (seconds)
-            max_delay: Maximum delay between requests (seconds)
+            follow_links: Not used in API mode (data is already complete)
+            max_pages: Maximum number of pages to scrape
+            min_delay: Minimum delay between API calls
+            max_delay: Maximum delay between API calls
         
         Returns:
             List of extracted data dictionaries
@@ -626,26 +722,26 @@ class ApolloScraper:
             log_message("❌ Not logged in! Please login first.", 'ERROR')
             return []
         
+        # Detect page type from URL (not HTML — Apollo is a SPA)
+        page_type = detect_page_type(url=url)
+        log_message(f"📄 Detected page type: {page_type}", 'INFO')
+        
+        # API-based extraction for search pages
+        if page_type in ('people_search', 'company_search'):
+            return self._scrape_search_via_api(
+                url=url,
+                search_type='people' if page_type == 'people_search' else 'organizations',
+                max_pages=max_pages or Config.MAX_PAGES,
+                min_delay=min_delay,
+                max_delay=max_delay
+            )
+        
+        # Fallback to HTML for profile pages
         log_message(f"🌐 Navigating to: {url}", 'INFO')
         self.driver.get(url)
         random_delay(min_delay, max_delay)
         
-        # Random human-like behavior
-        try:
-            # Scroll a bit (humans scroll)
-            self.driver.execute_script(f"window.scrollTo(0, {random.randint(100, 300)});")
-            random_delay(0.5, 1.0)
-        except:
-            pass
-        
-        # Detect page type
-        page_html = self.driver.page_source
-        page_type = detect_page_type(page_html)
-        log_message(f"📄 Detected page type: {page_type}", 'INFO')
-        
-        if page_type == 'search':
-            return self._scrape_search_results(follow_links, max_pages, min_delay, max_delay)
-        elif page_type == 'contact_profile':
+        if page_type == 'contact_profile':
             return [self._scrape_contact_profile()]
         elif page_type == 'company_profile':
             return [self._scrape_company_profile()]
@@ -653,162 +749,105 @@ class ApolloScraper:
             log_message("⚠️  Unknown page type, attempting generic extraction...", 'WARNING')
             return [self._scrape_generic_page()]
     
-    def _scrape_search_results(self, follow_links: bool = True, max_pages: int = None, min_delay: int = 3, max_delay: int = 7) -> List[Dict[str, Any]]:
+    def _scrape_search_via_api(self, url: str, search_type: str = 'people', max_pages: int = 10, min_delay: int = 3, max_delay: int = 7) -> List[Dict[str, Any]]:
         """
-        Scrape search results page with pagination.
+        Scrape search results using Apollo's internal API with pagination.
+        
+        This is the PRIMARY extraction method. It calls /api/v1/mixed_people/search
+        from within the browser, getting clean structured JSON with all fields
+        (email, phone, company, etc.) — no HTML parsing needed.
         
         Args:
-            follow_links: Follow links to enrich contact data
+            url: Original Apollo search URL (parsed for filters)
+            search_type: 'people' or 'organizations'
             max_pages: Maximum pages to scrape
-            min_delay: Minimum delay between pages
-            max_delay: Maximum delay between pages
+            min_delay: Minimum delay between API calls
+            max_delay: Maximum delay between API calls
         
         Returns:
-            List of all scraped results
+            List of flat record dicts ready for Apify dataset
         """
         all_results = []
-        page_num = 1
-        max_pages = max_pages or Config.MAX_PAGES
-        log_message(f"📊 Starting search results scraping (max {max_pages} pages)...", 'INFO')
         
-        while page_num <= max_pages:
-            log_message(f"📄 Scraping page {page_num}/{max_pages}...", 'INFO')
+        # Parse search URL into API filters
+        parsed = parse_apollo_search_url(url)
+        filters = parsed['filters']
+        start_page = parsed.get('page', 1)
+        
+        # First, navigate to Apollo so we're on the right domain for fetch()
+        log_message(f"🌐 Navigating to Apollo for API access...", 'INFO')
+        self.driver.get("https://app.apollo.io/#/people")
+        random_delay(3, 5)
+        
+        # Scrape pages
+        for page_offset in range(max_pages):
+            current_page = start_page + page_offset
+            log_message(f"📄 Fetching page {current_page} via API...", 'INFO')
             
-            # Human-like behavior before scraping
+            # Call the API
+            api_response = self.search_people_via_api(
+                filters=filters,
+                page=current_page,
+                per_page=25
+            )
+            
+            if not api_response:
+                log_message(f"⚠️  No API response for page {current_page}, stopping.", 'WARNING')
+                break
+            
+            # Get pagination info
+            pagination = get_pagination_info(api_response)
+            total = pagination['total_entries']
+            total_pages = pagination['total_pages']
+            
+            if page_offset == 0:
+                log_message(f"📊 Total results available: {total} across {total_pages} pages", 'INFO')
+                # Cap max_pages to actual available pages
+                max_pages = min(max_pages, total_pages)
+            
+            # Flatten the results into structured records
+            records = flatten_api_response(api_response, search_type)
+            
+            if not records:
+                log_message(f"⚠️  No records on page {current_page}, stopping.", 'WARNING')
+                break
+            
+            # Log sample data for verification
+            if records and page_offset == 0:
+                sample = records[0]
+                log_message(f"📋 Sample record: {sample.get('name', '?')} | {sample.get('title', '?')} | {sample.get('email', '?')} | {sample.get('company_name', '?')}", 'INFO')
+            
+            all_results.extend(records)
+            log_message(f"✅ Page {current_page}: {len(records)} records (total so far: {len(all_results)})", 'SUCCESS')
+            
+            # Check if we've reached the last page
+            if current_page >= total_pages:
+                log_message(f"📄 Reached last page ({total_pages})", 'INFO')
+                break
+            
+            # Human-like delay between API calls
+            random_delay(min_delay, max_delay)
+            
+            # Random scroll to simulate human behavior
             try:
-                scroll_amount = random.randint(200, 500)
-                self.driver.execute_script(f"window.scrollTo(0, {scroll_amount});")
-                random_delay(0.5, 1.0)
+                self.driver.execute_script(f"window.scrollTo(0, {random.randint(200, 600)});")
             except:
                 pass
-            
-            # Wait for results to load
-            random_delay(min_delay, max_delay)
-            
-            # Get current page HTML
-            page_html = self.driver.page_source
-            
-            # Parse results from current page
-            results = parse_search_results(page_html)
-            
-            if not results:
-                log_message("⚠️  No results found on this page, stopping pagination.", 'WARNING')
-                break
-            
-            log_message(f"✅ Found {len(results)} results on page {page_num}", 'SUCCESS')
-            
-            # Enrich results by visiting detail pages
-            if follow_links:
-                results = self._enrich_results(results)
-            
-            all_results.extend(results)
-            
-            # Try to go to next page
-            if not self._go_to_next_page():
-                log_message("📄 No more pages available", 'INFO')
-                break
-            
-            page_num += 1
-            random_delay(min_delay, max_delay)
         
-        log_message(f"🎉 Total results scraped: {len(all_results)}", 'SUCCESS')
+        log_message(f"🎉 Total records scraped: {len(all_results)}", 'SUCCESS')
         return all_results
     
-    def _enrich_results(self, results: List[Dict]) -> List[Dict]:
-        """
-        Enrich results by following links to detail pages.
-        
-        Args:
-            results: List of basic result dictionaries
-        
-        Returns:
-            Enriched results
-        """
-        enriched = []
-        
-        log_message(f"🔍 Enriching {len(results)} results...", 'INFO')
-        
-        for idx, result in enumerate(results, 1):
-            profile_url = result.get('profile_url')
-            
-            if profile_url:
-                try:
-                    log_message(f"🔗 Enriching contact {idx}/{len(results)}...", 'DEBUG')
-                    
-                    # Visit profile page
-                    self.driver.get(profile_url)
-                    random_delay(2, 4)
-                    
-                    # Parse detailed profile
-                    detailed_data = self._scrape_contact_profile()
-                    
-                    # Merge with basic data
-                    result.update(detailed_data)
-                    
-                    # Go back
-                    self.driver.back()
-                    random_delay(2, 3)
-                    
-                except Exception as e:
-                    log_message(f"⚠️  Failed to enrich contact: {str(e)}", 'WARNING')
-            
-            enriched.append(result)
-        
-        return enriched
-    
-    def _go_to_next_page(self) -> bool:
-        """
-        Navigate to next page in search results.
-        
-        Returns:
-            True if successfully navigated to next page, False otherwise
-        """
-        try:
-            # Try different selectors for next button
-            next_button_selectors = [
-                "button[aria-label='Next page']",
-                "a[aria-label='Next']",
-                ".pagination button:last-child",
-                "[class*='next']:not([disabled])",
-                "button[class*='next']"
-            ]
-            
-            for selector in next_button_selectors:
-                try:
-                    next_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if next_button.is_enabled() and next_button.is_displayed():
-                        # Human-like interaction
-                        self._human_like_mouse_movement(next_button)
-                        random_delay(0.3, 0.6)
-                        next_button.click()
-                        log_message("➡️  Clicked next page button", 'DEBUG')
-                        return True
-                except:
-                    continue
-            
-            # Try infinite scroll as fallback
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            random_delay(2, 3)
-            new_height = self.driver.execute_script("return document.body.scrollHeight")
-            
-            if new_height > last_height:
-                log_message("📜 Infinite scroll triggered", 'DEBUG')
-                return True
-            
-            return False
-            
-        except Exception as e:
-            log_message(f"⚠️  Could not navigate to next page: {str(e)}", 'DEBUG')
-            return False
+    # ═══════════════════════════════════════════════════════════════
+    # HTML FALLBACK — For profile pages and unknown page types
+    # ═══════════════════════════════════════════════════════════════
     
     def _scrape_contact_profile(self) -> Dict[str, Any]:
-        """Scrape current page as contact profile"""
+        """Scrape current page as contact profile (HTML fallback)"""
         page_html = self.driver.page_source
         return parse_contact_profile(page_html)
     
     def _scrape_company_profile(self) -> Dict[str, Any]:
-        """Scrape current page as company profile"""
+        """Scrape current page as company profile (HTML fallback)"""
         page_html = self.driver.page_source
         return parse_company_profile(page_html)
     
@@ -820,7 +859,7 @@ class ApolloScraper:
             'type': 'generic',
             'url': self.driver.current_url,
             'title': self.driver.title,
-            'text_content': soup.get_text()[:1000],  # First 1000 chars
+            'text_content': soup.get_text()[:1000],
             'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S')
         }
     
