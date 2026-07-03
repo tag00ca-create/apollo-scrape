@@ -92,8 +92,12 @@ async def main():
         
         try:
             # Create scraper instance
+            # Run headful (visible) if running locally for debugging/anti-bot bypass
+            # Apify sets APIFY_IS_AT_HOME=1 when running on their cloud
+            is_cloud = os.environ.get('APIFY_IS_AT_HOME') == '1'
+            
             scraper = ApolloScraper(
-                headless=True,  # Always headless on Apify
+                headless=is_cloud,
                 use_proxy=proxy_url is not None,
                 proxy_url=proxy_url
             )

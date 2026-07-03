@@ -78,6 +78,8 @@ class ApolloScraper:
         
         # Detect installed Chrome version to avoid version mismatch
         chrome_version = self._detect_chrome_version()
+        if not chrome_version:
+            chrome_version = 149  # Fallback for Windows test
         
         # Prepare options for undetected-chromedriver
         options = uc.ChromeOptions()
@@ -762,13 +764,23 @@ class ApolloScraper:
             
             # Navigate to trigger the React app to fetch data
             log_message(f"🌐 Navigating to trigger API request...", 'DEBUG')
-            self.driver.get(search_url)
+            try:
+                self.driver.get(search_url)
+            except Exception as e:
+                if 'timeout' in str(e).lower():
+                    log_message("⚠️  Page load timed out (30s), continuing to check for intercepted data...", 'WARNING')
+                else:
+                    log_message(f"⚠️  Navigation error: {e}", 'WARNING')
             
             # Force refresh on first page of segment to guarantee React Router processes the new URL
             if page_offset == 0:
                 random_delay(1, 2)
-                self.driver.refresh()
-                log_message("🔄 Refreshed page to ensure React app loads new filters.", 'DEBUG')
+                try:
+                    self.driver.refresh()
+                    log_message("🔄 Refreshed page to ensure React app loads new filters.", 'DEBUG')
+                except Exception as e:
+                    if 'timeout' in str(e).lower():
+                        log_message("⚠️  Page refresh timed out, continuing...", 'WARNING')
             
             # Wait for data to be intercepted
             api_response = None
