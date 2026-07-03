@@ -234,19 +234,43 @@ class ApolloScraper:
         
         // 9. API Interception for Stealth Bypass
         window.__interceptedData = window.__interceptedData || [];
+        
+        // Intercept fetch
         const originalFetch = window.fetch;
         window.fetch = async function(...args) {
             const response = await originalFetch.apply(this, args);
-            const url = args[0];
-            if (typeof url === 'string' && (url.includes('/api/v1/mixed_people/search') || url.includes('/api/v1/mixed_companies/search'))) {
-                try {
+            try {
+                let url = '';
+                if (typeof args[0] === 'string') url = args[0];
+                else if (args[0] && typeof args[0].url === 'string') url = args[0].url;
+                
+                if (url.includes('/api/v1/mixed_people/search') || url.includes('/api/v1/mixed_companies/search')) {
                     const clone = response.clone();
                     clone.json().then(data => {
                         window.__interceptedData.push({ url, data });
-                    }).catch(e => console.error(e));
-                } catch(e) {}
-            }
+                    }).catch(e => {});
+                }
+            } catch(e) {}
             return response;
+        };
+        
+        // Intercept XMLHttpRequest
+        const originalXhrOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this._url = url;
+            return originalXhrOpen.apply(this, arguments);
+        };
+        const originalXhrSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function() {
+            this.addEventListener('load', function() {
+                if (typeof this._url === 'string' && (this._url.includes('/api/v1/mixed_people/search') || this._url.includes('/api/v1/mixed_companies/search'))) {
+                    try {
+                        const data = JSON.parse(this.responseText);
+                        window.__interceptedData.push({ url: this._url, data });
+                    } catch(e) {}
+                }
+            });
+            return originalXhrSend.apply(this, arguments);
         };
         
         console.log('🔒 Advanced stealth mode activated');
@@ -740,9 +764,15 @@ class ApolloScraper:
             log_message(f"🌐 Navigating to trigger API request...", 'DEBUG')
             self.driver.get(search_url)
             
+            # Force refresh on first page of segment to guarantee React Router processes the new URL
+            if page_offset == 0:
+                random_delay(1, 2)
+                self.driver.refresh()
+                log_message("🔄 Refreshed page to ensure React app loads new filters.", 'DEBUG')
+            
             # Wait for data to be intercepted
             api_response = None
-            for _ in range(15):  # Wait up to 15 seconds
+            for _ in range(30):  # Wait up to 30 seconds
                 random_delay(1, 1)
                 
                 # Check for intercepted data

@@ -87,10 +87,45 @@ class SearchSegmenter:
     def __init__(self):
         self.segments = []
 
-    def generate_segments(self, level: str = 'standard', filters: Optional[Dict] = None, include_us: bool = True, include_intl: bool = True) -> List[Dict[str, Any]]:
+    def generate_segments(self, level: str = 'deep', filters: Optional[Dict] = None, include_us: bool = True, include_intl: bool = True) -> List[Dict[str, Any]]:
         self.segments = []
         base_filters = filters or {}
         
+        # Check if user already provided locations
+        custom_locations = base_filters.get('person_locations', [])
+        
+        if custom_locations:
+            # If user provided locations, just segment by Seniority and Employee Ranges
+            if level == 'light':
+                f = dict(base_filters)
+                self.segments.append({
+                    'id': f"custom_{_slug(custom_locations[0])}",
+                    'label': f"Custom / {custom_locations[0]}",
+                    'filters': f
+                })
+            elif level == 'standard':
+                for seniority in SENIORITIES:
+                    f = dict(base_filters)
+                    f['person_seniorities'] = [seniority]
+                    self.segments.append({
+                        'id': f"custom_{_slug(custom_locations[0])}_{seniority}",
+                        'label': f"{custom_locations[0]} / {seniority}",
+                        'filters': f
+                    })
+            elif level == 'deep':
+                for seniority in SENIORITIES:
+                    for emp_range in EMPLOYEE_RANGES:
+                        f = dict(base_filters)
+                        f['person_seniorities'] = [seniority]
+                        f['organization_num_employees_ranges'] = [emp_range]
+                        self.segments.append({
+                            'id': f"custom_{_slug(custom_locations[0])}_{seniority}_emp{emp_range.replace(',', '-')}",
+                            'label': f"{custom_locations[0]} / {seniority} / {emp_range} emp",
+                            'filters': f
+                        })
+            return self.segments
+            
+        # Default behavior (global scrape) if no locations provided
         if level == 'light':
             countries = COUNTRIES if include_intl else ['United States']
             for country in countries:
